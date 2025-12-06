@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include "shell.h"
 
 static void tx_str(shell_t* sh, const char* s){
@@ -18,9 +17,9 @@ void shell_init(shell_t* sh){
 
 void shell_rx_bytes(shell_t* sh, const char* s){
     while (*s) {
-        if (!rb_put(&sh->rx, (uint8_t)*s++)) {
-            // overflow na RX — jeżeli odetnie linię, wykryjemy to w tick
-        }
+        // Wrzucamy do Ring Buffera. Jeśli pełny -> rb_put zwróci 0 i zwiększy dropped wewnątrz rb_t.
+        // My tutaj nie musimy nic robić, licznik dropped jest w strukturze RB.
+        rb_put(&sh->rx, (uint8_t)*s++);
     }
 }
 
@@ -32,6 +31,7 @@ static void process_line(shell_t* sh, const char* line){
         tx_str(sh, buf);
     } else if (strncmp(line,"get",3)==0){
         char buf[96];
+        // Wyświetlamy statystyki: setpoint, ticki, ile bajtów RB odrzucił, ile linii shell odrzucił
         snprintf(buf,sizeof(buf),"set=%.3f ticks=%u drop=%zu broken=%u\r\n",
             sh->setpoint, sh->ticks, sh->rx.dropped, sh->broken_lines);
         tx_str(sh, buf);
@@ -44,6 +44,8 @@ static void process_line(shell_t* sh, const char* line){
         tx_str(sh, "ECHO ");
         tx_str(sh, line+5);
         tx_str(sh, "\r\n");
+    } else if (strncmp(line, "noop", 4) == 0) {
+        // Cicha komenda do testów bursta - żeby nie spamować "ERR" na wyjściu
     } else {
         tx_str(sh, "ERR\r\n");
     }
@@ -55,29 +57,24 @@ void shell_tick(shell_t* sh){
     static char line[128];
     static size_t n = 0;
     uint8_t b;
-    int saw_newline = 0;
 
+    // Pobieramy wszystko co jest w RX Ring Bufferze
     while (rb_get(&sh->rx, &b)){
         if (b == '\n' || b == '\r'){
             if (n > 0){
                 line[n] = 0;
                 process_line(sh, line);
                 n = 0;
-                saw_newline = 1;
             }
         } else if (n + 1 < sizeof(line)){
             line[n++] = (char)b;
         } else {
-            // linia za długa → oznacz i wyczyść
+            // Linia zbyt długa (bufor lokalny pełny) -> odrzucamy
             sh->broken_lines++;
-            n = 0;
+            n = 0; // Resetujemy bufor linii
         }
     }
 
-    // heurystyka: jeśli był overflow (rx.dropped>0) i nie domknęliśmy linii,
-    // a w kolejnych tickach pojawia się początek nowej komendy — rośnie broken_lines.
-    (void)saw_newline;
-
-    // "wysyłka" — w urządzeniu byłby UART; tu wypisujemy na stdout
+    // Opróżnianie TX Ring Buffera na ekran (symulacja UART TX)
     while (rb_get(&sh->tx, &b)) { putchar((char)b); }
 }
